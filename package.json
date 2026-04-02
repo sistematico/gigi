@@ -1,0 +1,30 @@
+{
+  "name": "gigi",
+  "description": "Discord bot que toca streams Icecast2 em canais de voz",
+  "version": "1.0.0",
+  "keywords": [],
+  "author": "",
+  "type": "module",
+  "main": "dist/bot.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/bot.js",
+    "dev": "tsx src/bot.ts"
+  },
+  "license": "ISC",
+  "packageManager": "pnpm@10.33.0",
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.26.0",
+    "dotenv": "^17.4.0",
+    "play-dl": "^1.9.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.5.0",
+    "eslint": "^10.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
