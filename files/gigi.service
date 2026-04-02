@@ -1,0 +1,17 @@
+[Unit]
+Description=Discord.js Bot Service
+After=network.target
+
+[Service]
+# User running the bot (e.g., node, ubuntu, or root)
+User=gigi
+WorkingDirectory=/home/gigi/gigi
+ExecStart=/home/gigi/.local/share/pnpm run start
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=gigi
+
+[Install]
+WantedBy=multi-user.target
