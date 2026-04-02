@@ -10,6 +10,7 @@ import {
 } from 'discord.js';
 import {
   AudioPlayerStatus,
+  StreamType,
   VoiceConnectionStatus,
   createAudioPlayer,
   createAudioResource,
@@ -17,16 +18,26 @@ import {
   getVoiceConnection,
   joinVoiceChannel,
 } from '@discordjs/voice';
-import playdl from 'play-dl';
+import { createRequire } from 'node:module';
+import { Readable } from 'node:stream';
 import { config } from 'dotenv';
+
+const require = createRequire(import.meta.url);
+const dfi = require('d-fi-core');
 
 config();
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const DEEZER_ARL = process.env.DEEZER_ARL;
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('DISCORD_TOKEN e CLIENT_ID precisam estar definidos no .env');
+  process.exit(1);
+}
+
+if (!DEEZER_ARL) {
+  console.error('DEEZER_ARL precisa estar definido no .env');
   process.exit(1);
 }
 
@@ -35,11 +46,11 @@ if (!TOKEN || !CLIENT_ID) {
 const commands = [
   new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Toca uma música do YouTube no canal de voz')
+    .setDescription('Toca uma música do Deezer no canal de voz')
     .addStringOption(option =>
       option
         .setName('query')
-        .setDescription('URL do YouTube ou termo de busca')
+        .setDescription('URL do Deezer ou termo de busca')
         .setRequired(true),
     ),
   new SlashCommandBuilder()
@@ -55,6 +66,56 @@ player.on('error', error => {
   console.error('Erro no player de áudio:', error.message);
 });
 
+// ─── Deezer helpers ──────────────────────────────────────────────────────────
+
+const DEEZER_TRACK_RE = /deezer\.com\/(?:\w+\/)?track\/(\d+)/;
+
+interface DfiTrack {
+  SNG_ID: string;
+  SNG_TITLE: string;
+  ART_NAME: string;
+  VERSION?: string;
+}
+
+async function fetchTrack(query: string): Promise<DfiTrack> {
+  const match = query.match(DEEZER_TRACK_RE);
+
+  if (match) {
+    return await dfi.getTrackInfo(match[1]);
+  }
+
+  const results = await dfi.searchMusic(query, ['TRACK'], 1);
+  const tracks = results?.TRACK?.data;
+
+  if (!tracks?.length) {
+    throw new Error('Nenhum resultado encontrado.');
+  }
+
+  return tracks[0];
+}
+
+async function downloadTrack(track: DfiTrack): Promise<Buffer> {
+  const dlInfo = await dfi.getTrackDownloadUrl(track, 1);
+
+  if (!dlInfo) {
+    throw new Error('Faixa indisponível para download.');
+  }
+
+  const res = await fetch(dlInfo.trackUrl);
+
+  if (!res.ok) {
+    throw new Error(`Erro ao baixar faixa: ${res.status}`);
+  }
+
+  const raw = Buffer.from(await res.arrayBuffer());
+  return dlInfo.isEncrypted ? dfi.decryptDownload(raw, track.SNG_ID) : raw;
+}
+
+function trackDisplayName(track: DfiTrack): string {
+  const version = track.VERSION ? ` (${track.VERSION})` : '';
+  return `${track.ART_NAME} - ${track.SNG_TITLE}${version}`;
+}
+
 // ─── Bot ──────────────────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -63,6 +124,9 @@ const client = new Client({
 
 client.once(Events.ClientReady, async readyClient => {
   console.log(`Pronto! Logado como ${readyClient.user.tag}`);
+
+  await dfi.initDeezerApi(DEEZER_ARL);
+  console.log('Deezer API inicializada.');
 
   const rest = new REST().setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), {
@@ -92,62 +156,48 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     const query = interaction.options.getString('query', true);
     await interaction.deferReply();
 
-    // Resolve URL: se for URL do YouTube usa diretamente, senão busca
-    let videoUrl: string;
-    let videoTitle: string;
+    try {
+      const track = await fetchTrack(query);
+      const audioBuffer = await downloadTrack(track);
+      const stream = Readable.from(audioBuffer);
 
-    const validation = playdl.yt_validate(query);
+      // Conecta ao canal de voz (ou reutiliza conexão existente)
+      let connection = getVoiceConnection(interaction.guildId);
 
-    if (validation === 'video') {
-      const info = await playdl.video_info(query);
-      videoUrl = query;
-      videoTitle = info.video_details.title ?? query;
-    } else {
-      const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
+      if (!connection) {
+        connection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: voiceChannel.guild.id,
+          adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+        });
 
-      if (!results.length) {
-        await interaction.editReply('Nenhum resultado encontrado para essa busca.');
-        return;
+        try {
+          await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+        } catch {
+          connection.destroy();
+          await interaction.editReply('Não foi possível conectar ao canal de voz.');
+          return;
+        }
       }
 
-      videoUrl = results[0].url;
-      videoTitle = results[0].title ?? query;
-    }
-
-    // Conecta ao canal de voz (ou reutiliza conexão existente)
-    let connection = getVoiceConnection(interaction.guildId);
-
-    if (!connection) {
-      connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: voiceChannel.guild.id,
-        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+      const resource = createAudioResource(stream, {
+        inputType: StreamType.Arbitrary,
       });
 
-      try {
-        await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-      } catch {
-        connection.destroy();
-        await interaction.editReply('Não foi possível conectar ao canal de voz.');
-        return;
-      }
+      player.play(resource);
+      connection.subscribe(player);
+
+      await interaction.editReply(`Tocando: **${trackDisplayName(track)}**`);
+
+      player.once(AudioPlayerStatus.Idle, () => {
+        const conn = getVoiceConnection(interaction.guildId!);
+        conn?.destroy();
+      });
+    } catch (error) {
+      console.error('Erro ao processar /play:', error);
+      const msg = error instanceof Error ? error.message : 'Erro desconhecido.';
+      await interaction.editReply(`Não foi possível reproduzir: ${msg}`);
     }
-
-    // Obtém stream de áudio do YouTube
-    const ytStream = await playdl.stream(videoUrl);
-    const resource = createAudioResource(ytStream.stream, {
-      inputType: ytStream.type,
-    });
-
-    player.play(resource);
-    connection.subscribe(player);
-
-    await interaction.editReply(`Tocando: **${videoTitle}**`);
-
-    player.once(AudioPlayerStatus.Idle, () => {
-      const conn = getVoiceConnection(interaction.guildId!);
-      conn?.destroy();
-    });
 
     return;
   }

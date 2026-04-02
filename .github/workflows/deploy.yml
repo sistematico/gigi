@@ -37,6 +37,7 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           script: |
             set -e
+            mkdir -p ${{ secrets.PROJECT_PATH }} 2>/dev/null || true
             cd ${{ secrets.PROJECT_PATH }}
             git pull origin main
             git clean -fxd -e .env
