@@ -23,7 +23,8 @@ jobs:
           cache: pnpm
 
       - name: Instalar dependências
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
+        #run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm build
