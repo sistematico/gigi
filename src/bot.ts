@@ -22,6 +22,10 @@ import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import { config } from 'dotenv';
 
+// YouTube
+import ytdl from 'ytdl-core';
+import ytSearch from 'yt-search';
+
 const require = createRequire(import.meta.url);
 const dfi = require('d-fi-core');
 
@@ -46,11 +50,11 @@ if (!DEEZER_ARL) {
 const commands = [
   new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Toca uma música do Deezer no canal de voz')
+    .setDescription('Toca uma música do Deezer ou YouTube no canal de voz')
     .addStringOption(option =>
       option
         .setName('query')
-        .setDescription('URL do Deezer ou termo de busca')
+        .setDescription('URL do Deezer, YouTube ou termo de busca')
         .setRequired(true),
     ),
   new SlashCommandBuilder()
@@ -77,36 +81,51 @@ interface DfiTrack {
   VERSION?: string;
 }
 
-async function fetchTrack(query: string): Promise<DfiTrack> {
-  const match = query.match(DEEZER_TRACK_RE);
 
-  if (match) {
-    return await dfi.getTrackInfo(match[1]);
+const YOUTUBE_URL_RE = /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/))([\w-]{11})/;
+
+async function fetchTrack(query: string): Promise<{ type: 'deezer', track: DfiTrack } | { type: 'youtube', info: any }> {
+  // Deezer
+  const deezerMatch = query.match(DEEZER_TRACK_RE);
+  if (deezerMatch) {
+    const track = await dfi.getTrackInfo(deezerMatch[1]);
+    return { type: 'deezer', track };
   }
 
+  // YouTube URL
+  const ytMatch = query.match(YOUTUBE_URL_RE);
+  if (ytMatch) {
+    const info = await ytdl.getInfo(ytMatch[1]);
+    return { type: 'youtube', info };
+  }
+
+  // Search Deezer first
   const results = await dfi.searchMusic(query, ['TRACK'], 1);
   const tracks = results?.TRACK?.data;
-
-  if (!tracks?.length) {
-    throw new Error('Nenhum resultado encontrado.');
+  if (tracks?.length) {
+    return { type: 'deezer', track: tracks[0] };
   }
 
-  return tracks[0];
+  // Search YouTube
+  const ytResults = await ytSearch(query);
+  const video = ytResults.videos?.[0];
+  if (video) {
+    const info = await ytdl.getInfo(video.videoId);
+    return { type: 'youtube', info };
+  }
+
+  throw new Error('Nenhum resultado encontrado no Deezer ou YouTube.');
 }
 
 async function downloadTrack(track: DfiTrack): Promise<Buffer> {
   const dlInfo = await dfi.getTrackDownloadUrl(track, 1);
-
   if (!dlInfo) {
     throw new Error('Faixa indisponível para download.');
   }
-
   const res = await fetch(dlInfo.trackUrl);
-
   if (!res.ok) {
     throw new Error(`Erro ao baixar faixa: ${res.status}`);
   }
-
   const raw = Buffer.from(await res.arrayBuffer());
   return dlInfo.isEncrypted ? dfi.decryptDownload(raw, track.SNG_ID) : raw;
 }
@@ -144,7 +163,6 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   if (commandName === 'play') {
     const member = interaction.member as GuildMember;
     const voiceChannel = member.voice.channel;
-
     if (!voiceChannel) {
       await interaction.reply({
         content: 'Você precisa estar em um canal de voz para usar este comando.',
@@ -157,20 +175,34 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     await interaction.deferReply();
 
     try {
-      const track = await fetchTrack(query);
-      const audioBuffer = await downloadTrack(track);
-      const stream = Readable.from(audioBuffer);
+      const result = await fetchTrack(query);
+      let resource: ReturnType<typeof createAudioResource> | undefined;
+      let title: string | undefined;
+
+      if (result.type === 'deezer') {
+        const audioBuffer = await downloadTrack(result.track);
+        const stream = Readable.from(audioBuffer);
+        resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+        title = trackDisplayName(result.track);
+      } else if (result.type === 'youtube') {
+        const ytStream = ytdl.downloadFromInfo(result.info, { filter: 'audioonly', quality: 'highestaudio' });
+        resource = createAudioResource(ytStream, { inputType: StreamType.Arbitrary });
+        title = result.info.videoDetails.title;
+      }
+
+      if (!resource || !title) {
+        await interaction.editReply('Não foi possível criar o recurso de áudio.');
+        return;
+      }
 
       // Conecta ao canal de voz (ou reutiliza conexão existente)
       let connection = getVoiceConnection(interaction.guildId);
-
       if (!connection) {
         connection = joinVoiceChannel({
           channelId: voiceChannel.id,
           guildId: voiceChannel.guild.id,
           adapterCreator: voiceChannel.guild.voiceAdapterCreator,
         });
-
         try {
           await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
         } catch {
@@ -180,14 +212,10 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         }
       }
 
-      const resource = createAudioResource(stream, {
-        inputType: StreamType.Arbitrary,
-      });
-
       player.play(resource);
       connection.subscribe(player);
 
-      await interaction.editReply(`Tocando: **${trackDisplayName(track)}**`);
+      await interaction.editReply(`Tocando: **${title}**`);
 
       player.once(AudioPlayerStatus.Idle, () => {
         const conn = getVoiceConnection(interaction.guildId!);
