@@ -33,6 +33,9 @@ importers:
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.2
+      '@types/yt-search':
+        specifier: ^2.10.3
+        version: 2.10.3
       eslint:
         specifier: ^10.1.0
         version: 10.2.0
@@ -439,6 +442,9 @@ packages:
 
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
+
+  '@types/yt-search@2.10.3':
+    resolution: {integrity: sha512-kH4Yzs/edH9/s/Wj58WhV73qpiRedWeNy5V202BqpXPd+xUFM8M3ASLdUMYUbzzlUDoGorDm4JpeN6iNx3sOjw==}
 
   '@vladfrangu/async_event_emitter@2.4.7':
     resolution: {integrity: sha512-Xfe6rpCTxSxfbswi/W/Pz7zp1WWSNn4A0eW4mLkQUewCrXXtMj31lCg+iQyTkh/CkusZSq9eDflu7tjEDXUY6g==}
@@ -1503,6 +1509,8 @@ snapshots:
   '@types/ws@8.18.1':
     dependencies:
       '@types/node': 25.5.2
+
+  '@types/yt-search@2.10.3': {}
 
   '@vladfrangu/async_event_emitter@2.4.7': {}
 
