@@ -1,4 +1,7 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   Client,
   Events,
   GatewayIntentBits,
@@ -58,9 +61,34 @@ const commands = [
         .setRequired(true),
     ),
   new SlashCommandBuilder()
+    .setName('radio')
+    .setDescription('Exibe botões para tocar rádios shoutcast/icecast predefinidas'),
+  new SlashCommandBuilder()
     .setName('stop')
     .setDescription('Para a reprodução e desconecta do canal de voz'),
 ] as const;
+
+// ─── Radio stations ───────────────────────────────────────────────────────────
+
+interface RadioStation {
+  id: string;
+  name: string;
+  emoji: string;
+  url: string;
+}
+
+const RADIO_STATIONS: RadioStation[] = [
+  { id: 'radiorock',      name: 'Radio Rock',    emoji: '🎸', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/RADIOROCK.mp3' },
+  { id: 'jovempan',       name: 'Jovem Pan',      emoji: '📻', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/JOVEMPANFM.mp3' },
+  { id: 'antena1',        name: 'Antena 1',       emoji: '🎵', url: 'https://antenaone.crossradio.com.br/stream/1' },
+  { id: 'cbn',            name: 'CBN',            emoji: '🗣️', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/CBNAM.mp3' },
+  { id: 'metropolitana',  name: 'Metropolitana',  emoji: '🏙️', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/METROPOLITANAFM.mp3' },
+  { id: 'transamerica',   name: 'Transamérica',   emoji: '🌎', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/TRANSAMFM.mp3' },
+  { id: 'bandnews',       name: 'BandNews',       emoji: '📰', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/BANDNEWSFM.mp3' },
+  { id: 'mix',            name: 'Mix FM',         emoji: '🎶', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/MIXFM.mp3' },
+  { id: 'cultura',        name: 'Rádio Cultura',  emoji: '🎼', url: 'https://streaming.rts.com.br/radiocultura' },
+  { id: 'alpha',          name: 'Alpha FM',       emoji: '✨', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/ALPHAFM.mp3' },
+];
 
 // ─── Audio player ─────────────────────────────────────────────────────────────
 
@@ -155,9 +183,91 @@ client.once(Events.ClientReady, async readyClient => {
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+  // ── /radio (botões) ────────────────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('radio_')) {
+    const stationId = interaction.customId.slice('radio_'.length);
+    const station = RADIO_STATIONS.find(s => s.id === stationId);
+    if (!station) {
+      await interaction.reply({ content: 'Rádio não encontrada.', ephemeral: true });
+      return;
+    }
+
+    const member = interaction.member as GuildMember;
+    const voiceChannel = member.voice.channel;
+    if (!voiceChannel) {
+      await interaction.reply({
+        content: 'Você precisa estar em um canal de voz para usar este botão.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await interaction.deferReply();
+
+    try {
+      const res = await fetch(station.url, { headers: { 'Icy-MetaData': '0' } });
+      if (!res.ok || !res.body) {
+        throw new Error(`HTTP ${res.status} ao conectar à rádio.`);
+      }
+      const stream = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]);
+      const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+
+      let connection = getVoiceConnection(interaction.guildId!);
+      if (!connection) {
+        connection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: voiceChannel.guild.id,
+          adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+        });
+        try {
+          await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+        } catch {
+          connection.destroy();
+          await interaction.editReply('Não foi possível conectar ao canal de voz.');
+          return;
+        }
+      }
+
+      player.play(resource);
+      connection.subscribe(player);
+
+      await interaction.editReply(`${station.emoji} Tocando **${station.name}** ao vivo!`);
+    } catch (error) {
+      console.error('Erro ao tocar rádio:', error);
+      const msg = error instanceof Error ? error.message : 'Erro desconhecido.';
+      await interaction.editReply(`Não foi possível tocar a rádio: ${msg}`);
+    }
+
+    return;
+  }
+
   if (!interaction.isChatInputCommand() || !interaction.guildId) return;
 
   const { commandName } = interaction;
+
+  // ── /radio ─────────────────────────────────────────────────────────────────
+  if (commandName === 'radio') {
+    // Divide as estações em linhas de até 5 botões
+    const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+    for (let i = 0; i < RADIO_STATIONS.length; i += 5) {
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        RADIO_STATIONS.slice(i, i + 5).map(s =>
+          new ButtonBuilder()
+            .setCustomId(`radio_${s.id}`)
+            .setLabel(s.name)
+            .setEmoji(s.emoji)
+            .setStyle(ButtonStyle.Secondary),
+        ),
+      );
+      rows.push(row);
+    }
+
+    await interaction.reply({
+      content: '📻 Escolha uma rádio para tocar no seu canal de voz:',
+      components: rows,
+    });
+    return;
+  }
 
   // ── /play ──────────────────────────────────────────────────────────────────
   if (commandName === 'play') {
