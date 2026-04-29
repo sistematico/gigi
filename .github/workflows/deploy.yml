@@ -48,8 +48,8 @@ jobs:
             git pull origin main
             git clean -fxd -e .env
             cp .env .env.production
-            #pnpm install --frozen-lockfile
-            pnpm install 
-            pnpm build
+            #/home/gigi/.local/share/pnpm/pnpm install --frozen-lockfile
+            /home/gigi/.local/share/pnpm/pnpm install 
+            /home/gigi/.local/share/pnpm/pnpm build
             sudo /usr/bin/systemctl restart gigi
             
