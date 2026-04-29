@@ -23,6 +23,8 @@ import {
 } from '@discordjs/voice';
 import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
+import http from 'node:http';
+import https from 'node:https';
 import { config } from 'dotenv';
 
 // YouTube
@@ -163,6 +165,31 @@ function trackDisplayName(track: DfiTrack): string {
   return `${track.ART_NAME} - ${track.SNG_TITLE}${version}`;
 }
 
+// ─── Radio stream helper ──────────────────────────────────────────────────────
+
+function fetchRadioStream(url: string, redirects = 5): Promise<Readable> {
+  return new Promise((resolve, reject) => {
+    if (redirects === 0) {
+      reject(new Error('Muitos redirecionamentos ao conectar à rádio.'));
+      return;
+    }
+    const proto = url.startsWith('https') ? https : http;
+    const req = proto.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Icy-MetaData': '0' } }, res => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        resolve(fetchRadioStream(res.headers.location, redirects - 1));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        reject(new Error(`HTTP ${res.statusCode} ao conectar à rádio.`));
+        return;
+      }
+      resolve(res);
+    });
+    req.on('error', reject);
+  });
+}
+
 // ─── Bot ──────────────────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -205,11 +232,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     await interaction.deferReply();
 
     try {
-      const res = await fetch(station.url, { headers: { 'Icy-MetaData': '0' } });
-      if (!res.ok || !res.body) {
-        throw new Error(`HTTP ${res.status} ao conectar à rádio.`);
-      }
-      const stream = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]);
+      const stream = await fetchRadioStream(station.url);
       const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
 
       let connection = getVoiceConnection(interaction.guildId!);
