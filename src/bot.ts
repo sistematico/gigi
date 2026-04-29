@@ -251,6 +251,7 @@ client.once(Events.ClientReady, async readyClient => {
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+  try {
   // ── /radio (botões) ────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('radio_')) {
     const stationId = interaction.customId.slice('radio_'.length);
@@ -416,6 +417,19 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     player.stop(true);
     connection.destroy();
     await interaction.reply('Parado e desconectado.');
+  }
+  } catch (err) {
+    console.error('[InteractionCreate] erro não tratado:', err);
+    try {
+      const reply = { content: 'Ocorreu um erro interno. Tente novamente.', ephemeral: true };
+      if (interaction.isRepliable()) {
+        if ((interaction as any).deferred || (interaction as any).replied) {
+          await (interaction as any).editReply(reply.content);
+        } else {
+          await (interaction as any).reply(reply);
+        }
+      }
+    } catch { /* ignora falha ao responder o erro */ }
   }
 });
 
