@@ -25,5 +25,10 @@
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   },
-  "packageManager": "pnpm@10.33.0"
+  "packageManager": "pnpm@10.33.0",
+  "pnpm": {
+    "overrides": {
+      "axios": "^1.7.0"
+    }
+  }
 }
