@@ -21,15 +21,12 @@ import {
   getVoiceConnection,
   joinVoiceChannel,
 } from '@discordjs/voice';
+import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import http from 'node:http';
 import https from 'node:https';
 import { config } from 'dotenv';
-
-// YouTube
-import ytdl from 'ytdl-core';
-import ytSearch from 'yt-search';
 
 const require = createRequire(import.meta.url);
 const dfi = require('d-fi-core');
@@ -114,37 +111,81 @@ interface DfiTrack {
 
 const YOUTUBE_URL_RE = /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/))([\w-]{11})/;
 
-async function fetchTrack(query: string): Promise<{ type: 'deezer', track: DfiTrack } | { type: 'youtube', info: any }> {
-  // Deezer
+// ─── yt-dlp helpers ───────────────────────────────────────────────────────────
+
+/** Obtém título e URL final de um vídeo ou pesquisa (ytsearch1:query). */
+function ytdlpGetInfo(input: string): Promise<{ url: string; title: string }> {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    const proc = spawn('yt-dlp', [
+      '--no-playlist',
+      '--print', 'title',
+      '--print', 'webpage_url',
+      '--no-download',
+      '--no-warnings',
+      input,
+    ]);
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.on('close', (code: number | null) => {
+      const lines = stdout.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      if (code === 0 && lines.length >= 2) {
+        resolve({ title: lines[0], url: lines[1] });
+      } else {
+        reject(new Error('Nenhum resultado encontrado no YouTube.'));
+      }
+    });
+    proc.on('error', (err: Error) =>
+      reject(new Error(`yt-dlp não encontrado no PATH: ${err.message}`)),
+    );
+  });
+}
+
+/** Retorna um Readable com o áudio de um vídeo YouTube via yt-dlp. */
+function ytdlpStream(url: string): Readable {
+  const proc = spawn('yt-dlp', [
+    '--no-playlist',
+    '-f', 'bestaudio/best',
+    '--no-warnings',
+    '-o', '-',
+    url,
+  ]);
+  proc.stderr.on('data', (d: Buffer) => {
+    const line = d.toString().trim();
+    if (line) console.error('[yt-dlp]', line);
+  });
+  proc.on('close', (code: number | null) => {
+    if (code !== 0) console.error(`[yt-dlp] processo encerrado com código ${code}`);
+  });
+  return proc.stdout as unknown as Readable;
+}
+
+async function fetchTrack(query: string): Promise<
+  | { type: 'deezer'; track: DfiTrack }
+  | { type: 'youtube'; url: string; title: string }
+> {
+  // Deezer URL
   const deezerMatch = query.match(DEEZER_TRACK_RE);
   if (deezerMatch) {
     const track = await dfi.getTrackInfo(deezerMatch[1]);
     return { type: 'deezer', track };
   }
 
-  // YouTube URL
-  const ytMatch = query.match(YOUTUBE_URL_RE);
-  if (ytMatch) {
-    const info = await ytdl.getInfo(ytMatch[1]);
-    return { type: 'youtube', info };
+  // YouTube URL direto
+  if (YOUTUBE_URL_RE.test(query)) {
+    const { url, title } = await ytdlpGetInfo(query);
+    return { type: 'youtube', url, title };
   }
 
-  // Search Deezer first
+  // Busca no Deezer primeiro
   const results = await dfi.searchMusic(query, ['TRACK'], 1);
   const tracks = results?.TRACK?.data;
   if (tracks?.length) {
     return { type: 'deezer', track: tracks[0] };
   }
 
-  // Search YouTube
-  const ytResults = await ytSearch(query);
-  const video = ytResults.videos?.[0];
-  if (video) {
-    const info = await ytdl.getInfo(video.videoId);
-    return { type: 'youtube', info };
-  }
-
-  throw new Error('Nenhum resultado encontrado no Deezer ou YouTube.');
+  // Busca no YouTube via yt-dlp
+  const { url, title } = await ytdlpGetInfo(`ytsearch1:${query}`);
+  return { type: 'youtube', url, title };
 }
 
 async function downloadTrack(track: DfiTrack): Promise<Buffer> {
@@ -318,9 +359,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
         title = trackDisplayName(result.track);
       } else if (result.type === 'youtube') {
-        const ytStream = ytdl.downloadFromInfo(result.info, { filter: 'audioonly', quality: 'highestaudio' });
+        const ytStream = ytdlpStream(result.url);
         resource = createAudioResource(ytStream, { inputType: StreamType.Arbitrary });
-        title = result.info.videoDetails.title;
+        title = result.title;
       }
 
       if (!resource || !title) {
