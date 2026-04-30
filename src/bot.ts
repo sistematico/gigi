@@ -251,7 +251,6 @@ client.once(Events.ClientReady, async readyClient => {
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-  console.log(`[interaction] type=${interaction.type} user=${interaction.user?.tag}`);
   try {
   // ── /radio (botões) ────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('radio_')) {
@@ -307,8 +306,10 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     return;
   }
 
-  if (!interaction.isChatInputCommand() || !interaction.guildId) {
-    console.log(`[interaction] ignorada: isChatInput=${interaction.isChatInputCommand()} guildId=${interaction.guildId ?? 'null'}`);
+  if (!interaction.isChatInputCommand()) return;
+
+  if (!interaction.guildId) {
+    await interaction.reply({ content: 'Este comando só pode ser usado dentro de um servidor.', ephemeral: true });
     return;
   }
 
