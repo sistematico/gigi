@@ -135,24 +135,53 @@ const YOUTUBE_URL_RE = /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/))(
 
 // ─── yt-dlp helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Argumentos extras para autenticar o yt-dlp e contornar o bloqueio anti-bot do YouTube.
+ * Configure UMA das variáveis no .env:
+ *   - YTDLP_COOKIES_FROM_BROWSER=firefox|chrome|chromium|brave|edge|opera|vivaldi|safari
+ *   - YTDLP_COOKIES_FILE=/caminho/para/cookies.txt
+ */
+function ytdlpAuthArgs(): string[] {
+  const fromBrowser = process.env.YTDLP_COOKIES_FROM_BROWSER;
+  if (fromBrowser) return ['--cookies-from-browser', fromBrowser];
+  const cookiesFile = process.env.YTDLP_COOKIES_FILE;
+  if (cookiesFile) return ['--cookies', cookiesFile];
+  return [];
+}
+
 /** Obtém título e URL final de um vídeo ou pesquisa (ytsearch1:query). */
 function ytdlpGetInfo(input: string): Promise<{ url: string; title: string }> {
   return new Promise((resolve, reject) => {
     let stdout = '';
+    let stderr = '';
     const proc = spawn('yt-dlp', [
       '--no-playlist',
       '--print', 'title',
       '--print', 'webpage_url',
       '--no-download',
       '--no-warnings',
+      ...ytdlpAuthArgs(),
       input,
     ]);
+    proc.stderr.on('data', (d: Buffer) => {
+      const line = d.toString().trim();
+      if (line) {
+        stderr += line + '\n';
+        console.error('[yt-dlp:info]', line);
+      }
+    });
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.on('close', (code: number | null) => {
       const lines = stdout.trim().split('\n').map(l => l.trim()).filter(Boolean);
       if (code === 0 && lines.length >= 2) {
         resolve({ title: lines[0], url: lines[1] });
       } else {
+        if (/Sign in to confirm you.?re not a bot/i.test(stderr)) {
+          reject(new Error(
+            'YouTube exigiu autenticação anti-bot. Configure YTDLP_COOKIES_FROM_BROWSER ou YTDLP_COOKIES_FILE no .env.',
+          ));
+          return;
+        }
         reject(new Error('Nenhum resultado encontrado no YouTube.'));
       }
     });
@@ -168,6 +197,7 @@ function ytdlpStream(url: string): Readable {
     '--no-playlist',
     '-f', 'bestaudio/best',
     '--no-warnings',
+    ...ytdlpAuthArgs(),
     '-o', '-',
     url,
   ]);
