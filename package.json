@@ -8,8 +8,8 @@
   "main": "dist/bot.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/bot.js",
-    "dev": "tsx src/bot.ts"
+    "start": "node --openssl-legacy-provider dist/bot.js",
+    "dev": "NODE_OPTIONS=--openssl-legacy-provider tsx src/bot.ts"
   },
   "license": "ISC",
   "dependencies": {
