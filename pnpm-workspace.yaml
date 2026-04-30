@@ -1,4 +1,7 @@
 allowBuilds:
   '@discordjs/opus': true
+<<<<<<< HEAD
   esbuild: true
+=======
+>>>>>>> a8aaea2 (feat: add pnpm workspace configuration for Discord.js and ffmpeg builds)
   ffmpeg-static: true
