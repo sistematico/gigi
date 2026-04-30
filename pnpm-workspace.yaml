@@ -1,4 +1,5 @@
-allowBuilds:
-  '@discordjs/opus': true
-  esbuild: true
-  ffmpeg-static: true
+onlyBuiltDependencies:
+  - '@discordjs/opus'
+  - esbuild
+  - ffmpeg-static
+  - sodium-native
