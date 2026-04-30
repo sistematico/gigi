@@ -307,7 +307,10 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     return;
   }
 
-  if (!interaction.isChatInputCommand() || !interaction.guildId) return;
+  if (!interaction.isChatInputCommand() || !interaction.guildId) {
+    console.log(`[interaction] ignorada: isChatInput=${interaction.isChatInputCommand()} guildId=${interaction.guildId ?? 'null'}`);
+    return;
+  }
 
   const { commandName } = interaction;
 
