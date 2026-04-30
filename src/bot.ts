@@ -251,6 +251,7 @@ client.once(Events.ClientReady, async readyClient => {
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+  console.log(`[interaction] type=${interaction.type} user=${interaction.user?.tag}`);
   try {
   // ── /radio (botões) ────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('radio_')) {
