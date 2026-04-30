@@ -276,6 +276,7 @@ let radioState: { stationName: string; emoji: string; startedBy: string } | null
 let activeGuildId: string | null = null;
 let activeVoiceChannelId: string | null = null;
 let activeTextChannelId: string | null = null;
+let isProcessingQueue = false;
 
 // ─── Permission helper ────────────────────────────────────────────────────────
 
@@ -303,10 +304,16 @@ function clearPlayerState(): void {
   activeGuildId = null;
   activeVoiceChannelId = null;
   activeTextChannelId = null;
+  isProcessingQueue = false;
 }
 
 async function playNextInQueue(): Promise<void> {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
   if (queue.length === 0) {
+    isProcessingQueue = false;
+    currentItem = null;
     if (activeGuildId) {
       const conn = getVoiceConnection(activeGuildId);
       conn?.destroy();
@@ -331,7 +338,9 @@ async function playNextInQueue(): Promise<void> {
     }
 
     resource.volume?.setVolume(currentVolume);
+
     player.play(resource);
+    // isProcessingQueue só é liberado quando o player entrar em Playing (via stateChange)
 
     // Anuncia no canal de texto
     if (activeTextChannelId && activeGuildId) {
@@ -344,15 +353,37 @@ async function playNextInQueue(): Promise<void> {
       }
     }
   } catch (error) {
-    console.error('[playNextInQueue] erro:', error);
+    console.error('[playNextInQueue] erro ao carregar faixa:', error);
     currentItem = null;
-    await playNextInQueue(); // tenta próxima da fila
+    isProcessingQueue = false;
+
+    // Anuncia erro e tenta próxima (se houver)
+    if (activeTextChannelId && activeGuildId) {
+      try {
+        const guild = await client.guilds.fetch(activeGuildId);
+        const channel = await guild.channels.fetch(activeTextChannelId) as TextChannel | null;
+        const msg = error instanceof Error ? error.message : 'Erro desconhecido.';
+        await channel?.send(`⚠️ Não foi possível reproduzir **${item.title}**: ${msg}`);
+      } catch { /* silencioso */ }
+    }
+
+    if (queue.length > 0) {
+      playNextInQueue().catch(err => console.error('[playNextInQueue] erro na faixa seguinte:', err));
+    }
+    // Não destrói a conexão em caso de erro — aguarda próximo /play ou /stop
   }
 }
 
 // Avança fila automaticamente ao terminar
 player.on('stateChange', (oldState, newState) => {
+  // Libera o lock assim que o player começa a tocar de verdade
+  if (newState.status === AudioPlayerStatus.Playing) {
+    isProcessingQueue = false;
+  }
+
+  // Avança a fila quando uma faixa termina (ou falha após ter iniciado)
   if (
+    !isProcessingQueue &&
     oldState.status !== AudioPlayerStatus.Idle &&
     newState.status === AudioPlayerStatus.Idle &&
     radioState === null
@@ -553,8 +584,10 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
           await interaction.editReply('Não foi possível conectar ao canal de voz.');
           return;
         }
-        connection.subscribe(player);
       }
+
+      // Sempre garante que o player está inscrito na conexão ativa
+      connection.subscribe(player);
 
       const isIdle = player.state.status === AudioPlayerStatus.Idle;
       if (isIdle) {
@@ -631,6 +664,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
     const skipped = currentItem.title;
     currentItem = null;
+    isProcessingQueue = false; // libera lock antes de parar
     player.stop(true); // stateChange → Idle → playNextInQueue()
     await interaction.reply(`⏭ **${skipped}** pulada.`);
     return;
