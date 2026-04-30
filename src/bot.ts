@@ -6,10 +6,12 @@ import {
   Events,
   GatewayIntentBits,
   GuildMember,
+  PermissionFlagsBits,
   REST,
   Routes,
   SlashCommandBuilder,
   type Interaction,
+  type TextChannel,
 } from 'discord.js';
 import {
   AudioPlayerStatus,
@@ -65,6 +67,33 @@ const commands = [
   new SlashCommandBuilder()
     .setName('stop')
     .setDescription('Para a reprodução e desconecta do canal de voz'),
+  new SlashCommandBuilder()
+    .setName('skip')
+    .setDescription('Pula a música atual da fila'),
+  new SlashCommandBuilder()
+    .setName('queue')
+    .setDescription('Exibe a fila de reprodução atual'),
+  new SlashCommandBuilder()
+    .setName('remove')
+    .setDescription('Remove uma música da fila pelo número')
+    .addIntegerOption(option =>
+      option
+        .setName('posicao')
+        .setDescription('Número da música na fila (use /queue para ver)')
+        .setMinValue(1)
+        .setRequired(true),
+    ),
+  new SlashCommandBuilder()
+    .setName('volume')
+    .setDescription('Ajusta o volume da reprodução (0–100)')
+    .addIntegerOption(option =>
+      option
+        .setName('nivel')
+        .setDescription('Nível de volume entre 0 e 100')
+        .setMinValue(0)
+        .setMaxValue(100)
+        .setRequired(true),
+    ),
 ] as const;
 
 // ─── Radio stations ───────────────────────────────────────────────────────────
@@ -89,14 +118,6 @@ const RADIO_STATIONS: RadioStation[] = [
   { id: 'cultura',        name: 'Rádio Cultura',  emoji: '🎼', url: 'https://streaming.rts.com.br/radiocultura' },
   { id: 'alpha',          name: 'Alpha FM',       emoji: '✨', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/ALPHAFM.mp3' },
 ];
-
-// ─── Audio player ─────────────────────────────────────────────────────────────
-
-const player = createAudioPlayer();
-
-player.on('error', error => {
-  console.error('Erro no player de áudio:', error.message);
-});
 
 // ─── Deezer helpers ──────────────────────────────────────────────────────────
 
@@ -238,6 +259,108 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
+// ─── Volume & queue state ─────────────────────────────────────────────────────
+
+let currentVolume = 0.2; // 20% por padrão
+
+interface QueueItem {
+  title: string;
+  addedBy: string;     // userId
+  addedByTag: string;  // username para display
+  resolved: { type: 'deezer'; track: DfiTrack } | { type: 'youtube'; url: string; title: string };
+}
+
+let queue: QueueItem[] = [];
+let currentItem: QueueItem | null = null;
+let radioState: { stationName: string; emoji: string; startedBy: string } | null = null;
+let activeGuildId: string | null = null;
+let activeVoiceChannelId: string | null = null;
+let activeTextChannelId: string | null = null;
+
+// ─── Permission helper ────────────────────────────────────────────────────────
+
+function isAdmin(member: GuildMember): boolean {
+  return (
+    member.permissions.has(PermissionFlagsBits.Administrator) ||
+    member.permissions.has(PermissionFlagsBits.ManageGuild)
+  );
+}
+
+// ─── Audio player ─────────────────────────────────────────────────────────────
+
+const player = createAudioPlayer();
+
+player.on('error', error => {
+  console.error('Erro no player de áudio:', error.message);
+});
+
+// ─── Playlist state management ────────────────────────────────────────────────
+
+function clearPlayerState(): void {
+  queue = [];
+  currentItem = null;
+  radioState = null;
+  activeGuildId = null;
+  activeVoiceChannelId = null;
+  activeTextChannelId = null;
+}
+
+async function playNextInQueue(): Promise<void> {
+  if (queue.length === 0) {
+    if (activeGuildId) {
+      const conn = getVoiceConnection(activeGuildId);
+      conn?.destroy();
+    }
+    clearPlayerState();
+    return;
+  }
+
+  const item = queue.shift()!;
+  currentItem = item;
+
+  try {
+    let resource: ReturnType<typeof createAudioResource>;
+
+    if (item.resolved.type === 'deezer') {
+      const audioBuffer = await downloadTrack(item.resolved.track);
+      const stream = Readable.from(audioBuffer);
+      resource = createAudioResource(stream, { inputType: StreamType.Arbitrary, inlineVolume: true });
+    } else {
+      const ytStream = ytdlpStream(item.resolved.url);
+      resource = createAudioResource(ytStream, { inputType: StreamType.Arbitrary, inlineVolume: true });
+    }
+
+    resource.volume?.setVolume(currentVolume);
+    player.play(resource);
+
+    // Anuncia no canal de texto
+    if (activeTextChannelId && activeGuildId) {
+      try {
+        const guild = await client.guilds.fetch(activeGuildId);
+        const channel = await guild.channels.fetch(activeTextChannelId) as TextChannel | null;
+        await channel?.send(`▶ Tocando: **${item.title}** — adicionado por **${item.addedByTag}**`);
+      } catch {
+        // falha silenciosa no anúncio
+      }
+    }
+  } catch (error) {
+    console.error('[playNextInQueue] erro:', error);
+    currentItem = null;
+    await playNextInQueue(); // tenta próxima da fila
+  }
+}
+
+// Avança fila automaticamente ao terminar
+player.on('stateChange', (oldState, newState) => {
+  if (
+    oldState.status !== AudioPlayerStatus.Idle &&
+    newState.status === AudioPlayerStatus.Idle &&
+    radioState === null
+  ) {
+    playNextInQueue().catch(err => console.error('[stateChange] erro:', err));
+  }
+});
+
 client.once(Events.ClientReady, async readyClient => {
   console.log(`Pronto! Logado como ${readyClient.user.tag}`);
 
@@ -272,11 +395,31 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       return;
     }
 
+    // Bloqueia rádio se há playlist ativa e o usuário não é admin
+    if ((currentItem !== null || queue.length > 0) && !isAdmin(member)) {
+      await interaction.reply({
+        content: 'O bot está no modo playlist. Apenas administradores podem iniciar uma rádio agora.',
+        ephemeral: true,
+      });
+      return;
+    }
+
     await interaction.deferReply();
+
+    // Admin interrompendo playlist ativa: limpa estado antes de iniciar a rádio
+    if (currentItem !== null || queue.length > 0) {
+      player.stop(true);
+      if (activeGuildId) {
+        const conn = getVoiceConnection(activeGuildId);
+        conn?.destroy();
+      }
+      clearPlayerState();
+    }
 
     try {
       const stream = await fetchRadioStream(station.url);
-      const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+      const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary, inlineVolume: true });
+      resource.volume?.setVolume(currentVolume);
 
       let connection = getVoiceConnection(interaction.guildId!);
       if (!connection) {
@@ -293,6 +436,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
           return;
         }
       }
+
+      radioState = { stationName: station.name, emoji: station.emoji, startedBy: interaction.user.id };
+      activeGuildId = interaction.guildId!;
 
       player.play(resource);
       connection.subscribe(player);
@@ -352,31 +498,46 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       return;
     }
 
+    // Bloqueia /play durante rádio para não-admins
+    if (radioState !== null && !isAdmin(member)) {
+      await interaction.reply({
+        content: `O bot está tocando a rádio **${radioState.stationName}** ao vivo. Apenas administradores podem interromper.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
     const query = interaction.options.getString('query', true);
     await interaction.deferReply();
 
     try {
-      const result = await fetchTrack(query);
-      let resource: ReturnType<typeof createAudioResource> | undefined;
-      let title: string | undefined;
+      // Resolve título e fonte agora; o download/stream ocorre em playNextInQueue
+      const resolved = await fetchTrack(query);
+      const title = resolved.type === 'deezer' ? trackDisplayName(resolved.track) : resolved.title;
 
-      if (result.type === 'deezer') {
-        const audioBuffer = await downloadTrack(result.track);
-        const stream = Readable.from(audioBuffer);
-        resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
-        title = trackDisplayName(result.track);
-      } else if (result.type === 'youtube') {
-        const ytStream = ytdlpStream(result.url);
-        resource = createAudioResource(ytStream, { inputType: StreamType.Arbitrary });
-        title = result.title;
+      // Admin interrompendo rádio: para e limpa estado
+      if (radioState !== null) {
+        player.stop(true);
+        if (activeGuildId) {
+          const conn = getVoiceConnection(activeGuildId);
+          conn?.destroy();
+        }
+        clearPlayerState();
       }
 
-      if (!resource || !title) {
-        await interaction.editReply('Não foi possível criar o recurso de áudio.');
-        return;
-      }
+      const item: QueueItem = {
+        title,
+        addedBy: interaction.user.id,
+        addedByTag: interaction.user.tag ?? interaction.user.username,
+        resolved,
+      };
 
-      // Conecta ao canal de voz (ou reutiliza conexão existente)
+      queue.push(item);
+      activeTextChannelId = interaction.channelId;
+      activeGuildId = interaction.guildId;
+      activeVoiceChannelId = voiceChannel.id;
+
+      // Conecta ao canal de voz se ainda não estiver conectado
       let connection = getVoiceConnection(interaction.guildId);
       if (!connection) {
         connection = joinVoiceChannel({
@@ -388,20 +549,20 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
           await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
         } catch {
           connection.destroy();
+          queue.pop();
           await interaction.editReply('Não foi possível conectar ao canal de voz.');
           return;
         }
+        connection.subscribe(player);
       }
 
-      player.play(resource);
-      connection.subscribe(player);
-
-      await interaction.editReply(`Tocando: **${title}**`);
-
-      player.once(AudioPlayerStatus.Idle, () => {
-        const conn = getVoiceConnection(interaction.guildId!);
-        conn?.destroy();
-      });
+      const isIdle = player.state.status === AudioPlayerStatus.Idle;
+      if (isIdle) {
+        await interaction.editReply(`✅ **${title}** adicionado à fila`);
+        playNextInQueue().catch(err => console.error('[play] erro em playNextInQueue:', err));
+      } else {
+        await interaction.editReply(`✅ **${title}** adicionado à fila na posição **${queue.length}**`);
+      }
     } catch (error) {
       console.error('Erro ao processar /play:', error);
       const msg = error instanceof Error ? error.message : 'Erro desconhecido.';
@@ -413,16 +574,139 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
   // ── /stop ──────────────────────────────────────────────────────────────────
   if (commandName === 'stop') {
+    const member = interaction.member as GuildMember;
     const connection = getVoiceConnection(interaction.guildId);
 
-    if (!connection) {
+    if (!connection && radioState === null && currentItem === null && queue.length === 0) {
       await interaction.reply({ content: 'Não estou em nenhum canal de voz.', ephemeral: true });
       return;
     }
 
+    // Verifica permissão
+    if (radioState !== null) {
+      if (!isAdmin(member) && interaction.user.id !== radioState.startedBy) {
+        await interaction.reply({
+          content: 'Apenas quem iniciou a rádio ou administradores podem parar a reprodução.',
+          ephemeral: true,
+        });
+        return;
+      }
+    } else {
+      if (!isAdmin(member)) {
+        await interaction.reply({
+          content: 'Apenas administradores podem parar a playlist.',
+          ephemeral: true,
+        });
+        return;
+      }
+    }
+
     player.stop(true);
-    connection.destroy();
-    await interaction.reply('Parado e desconectado.');
+    connection?.destroy();
+    clearPlayerState();
+    await interaction.reply('⏹ Parado e desconectado.');
+    return;
+  }
+
+  // ── /skip ──────────────────────────────────────────────────────────────────
+  if (commandName === 'skip') {
+    if (radioState !== null) {
+      await interaction.reply({ content: 'Não é possível pular uma rádio. Use `/stop` para parar.', ephemeral: true });
+      return;
+    }
+
+    if (!currentItem) {
+      await interaction.reply({ content: 'Nenhuma música está tocando no momento.', ephemeral: true });
+      return;
+    }
+
+    const member = interaction.member as GuildMember;
+    if (!isAdmin(member) && interaction.user.id !== currentItem.addedBy) {
+      await interaction.reply({
+        content: 'Apenas quem adicionou a música ou administradores podem pulá-la.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const skipped = currentItem.title;
+    currentItem = null;
+    player.stop(true); // stateChange → Idle → playNextInQueue()
+    await interaction.reply(`⏭ **${skipped}** pulada.`);
+    return;
+  }
+
+  // ── /queue ─────────────────────────────────────────────────────────────────
+  if (commandName === 'queue') {
+    if (radioState !== null) {
+      await interaction.reply(`📻 Tocando rádio ao vivo: **${radioState.stationName}** ${radioState.emoji}`);
+      return;
+    }
+
+    if (!currentItem && queue.length === 0) {
+      await interaction.reply('📭 A fila está vazia.');
+      return;
+    }
+
+    const lines: string[] = [];
+    if (currentItem) {
+      lines.push(`▶ **Tocando agora:** ${currentItem.title} — adicionado por **${currentItem.addedByTag}**`);
+    }
+    if (queue.length > 0) {
+      lines.push('');
+      lines.push('**Na fila:**');
+      queue.forEach((item, i) => {
+        lines.push(`${i + 1}. ${item.title} — adicionado por **${item.addedByTag}**`);
+      });
+    }
+
+    await interaction.reply(lines.join('\n'));
+    return;
+  }
+
+  // ── /remove ────────────────────────────────────────────────────────────────
+  if (commandName === 'remove') {
+    if (radioState !== null) {
+      await interaction.reply({ content: 'Não há fila ativa durante uma rádio.', ephemeral: true });
+      return;
+    }
+
+    const pos = interaction.options.getInteger('posicao', true);
+    if (pos > queue.length) {
+      await interaction.reply({
+        content: `Posição inválida. A fila tem **${queue.length}** item(s). Use \`/queue\` para ver.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const item = queue[pos - 1];
+    const member = interaction.member as GuildMember;
+    if (!isAdmin(member) && interaction.user.id !== item.addedBy) {
+      await interaction.reply({
+        content: 'Apenas quem adicionou a música ou administradores podem removê-la da fila.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    queue.splice(pos - 1, 1);
+    await interaction.reply(`🗑 **${item.title}** removida da fila.`);
+    return;
+  }
+
+  // ── /volume ────────────────────────────────────────────────────────────────
+  if (commandName === 'volume') {
+    const nivel = interaction.options.getInteger('nivel', true);
+    currentVolume = nivel / 100;
+
+    const state = player.state;
+    if (state.status !== AudioPlayerStatus.Idle && 'resource' in state) {
+      (state.resource as ReturnType<typeof createAudioResource>).volume?.setVolume(currentVolume);
+    }
+
+    await interaction.reply(`🔊 Volume ajustado para **${nivel}%**`);
+    return;
   }
   } catch (err) {
     console.error('[InteractionCreate] erro não tratado:', err);
