@@ -23,7 +23,6 @@ import {
   getVoiceConnection,
   joinVoiceChannel,
 } from '@discordjs/voice';
-import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import http from 'node:http';
@@ -54,11 +53,11 @@ if (!DEEZER_ARL) {
 const commands = [
   new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Toca uma música do Deezer ou YouTube no canal de voz')
+    .setDescription('Toca uma música do Deezer no canal de voz')
     .addStringOption(option =>
       option
         .setName('query')
-        .setDescription('URL do Deezer, YouTube ou termo de busca')
+        .setDescription('URL do Deezer ou termo de busca')
         .setRequired(true),
     ),
   new SlashCommandBuilder()
@@ -130,91 +129,7 @@ interface DfiTrack {
   VERSION?: string;
 }
 
-
-const YOUTUBE_URL_RE = /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/))([\w-]{11})/;
-
-// ─── yt-dlp helpers ───────────────────────────────────────────────────────────
-
-/**
- * Argumentos extras para autenticar o yt-dlp e contornar o bloqueio anti-bot do YouTube.
- * Configure UMA das variáveis no .env:
- *   - YTDLP_COOKIES_FROM_BROWSER=firefox|chrome|chromium|brave|edge|opera|vivaldi|safari
- *   - YTDLP_COOKIES_FILE=/caminho/para/cookies.txt
- */
-function ytdlpAuthArgs(): string[] {
-  const fromBrowser = process.env.YTDLP_COOKIES_FROM_BROWSER;
-  if (fromBrowser) return ['--cookies-from-browser', fromBrowser];
-  const cookiesFile = process.env.YTDLP_COOKIES_FILE;
-  if (cookiesFile) return ['--cookies', cookiesFile];
-  return [];
-}
-
-/** Obtém título e URL final de um vídeo ou pesquisa (ytsearch1:query). */
-function ytdlpGetInfo(input: string): Promise<{ url: string; title: string }> {
-  return new Promise((resolve, reject) => {
-    let stdout = '';
-    let stderr = '';
-    const proc = spawn('yt-dlp', [
-      '--no-playlist',
-      '--print', 'title',
-      '--print', 'webpage_url',
-      '--no-download',
-      '--no-warnings',
-      ...ytdlpAuthArgs(),
-      input,
-    ]);
-    proc.stderr.on('data', (d: Buffer) => {
-      const line = d.toString().trim();
-      if (line) {
-        stderr += line + '\n';
-        console.error('[yt-dlp:info]', line);
-      }
-    });
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.on('close', (code: number | null) => {
-      const lines = stdout.trim().split('\n').map(l => l.trim()).filter(Boolean);
-      if (code === 0 && lines.length >= 2) {
-        resolve({ title: lines[0], url: lines[1] });
-      } else {
-        if (/Sign in to confirm you.?re not a bot/i.test(stderr)) {
-          reject(new Error(
-            'YouTube exigiu autenticação anti-bot. Configure YTDLP_COOKIES_FROM_BROWSER ou YTDLP_COOKIES_FILE no .env.',
-          ));
-          return;
-        }
-        reject(new Error('Nenhum resultado encontrado no YouTube.'));
-      }
-    });
-    proc.on('error', (err: Error) =>
-      reject(new Error(`yt-dlp não encontrado no PATH: ${err.message}`)),
-    );
-  });
-}
-
-/** Retorna um Readable com o áudio de um vídeo YouTube via yt-dlp. */
-function ytdlpStream(url: string): Readable {
-  const proc = spawn('yt-dlp', [
-    '--no-playlist',
-    '-f', 'bestaudio/best',
-    '--no-warnings',
-    ...ytdlpAuthArgs(),
-    '-o', '-',
-    url,
-  ]);
-  proc.stderr.on('data', (d: Buffer) => {
-    const line = d.toString().trim();
-    if (line) console.error('[yt-dlp]', line);
-  });
-  proc.on('close', (code: number | null) => {
-    if (code !== 0) console.error(`[yt-dlp] processo encerrado com código ${code}`);
-  });
-  return proc.stdout as unknown as Readable;
-}
-
-async function fetchTrack(query: string): Promise<
-  | { type: 'deezer'; track: DfiTrack }
-  | { type: 'youtube'; url: string; title: string }
-> {
+async function fetchTrack(query: string): Promise<{ type: 'deezer'; track: DfiTrack }> {
   // Deezer URL
   const deezerMatch = query.match(DEEZER_TRACK_RE);
   if (deezerMatch) {
@@ -222,22 +137,14 @@ async function fetchTrack(query: string): Promise<
     return { type: 'deezer', track };
   }
 
-  // YouTube URL direto
-  if (YOUTUBE_URL_RE.test(query)) {
-    const { url, title } = await ytdlpGetInfo(query);
-    return { type: 'youtube', url, title };
-  }
-
-  // Busca no Deezer primeiro
+  // Busca no Deezer
   const results = await dfi.searchMusic(query, ['TRACK'], 1);
   const tracks = results?.TRACK?.data;
   if (tracks?.length) {
     return { type: 'deezer', track: tracks[0] };
   }
 
-  // Busca no YouTube via yt-dlp
-  const { url, title } = await ytdlpGetInfo(`ytsearch1:${query}`);
-  return { type: 'youtube', url, title };
+  throw new Error('Nenhum resultado encontrado no Deezer.');
 }
 
 async function downloadTrack(track: DfiTrack): Promise<Buffer> {
@@ -297,7 +204,7 @@ interface QueueItem {
   title: string;
   addedBy: string;     // userId
   addedByTag: string;  // username para display
-  resolved: { type: 'deezer'; track: DfiTrack } | { type: 'youtube'; url: string; title: string };
+  resolved: { type: 'deezer'; track: DfiTrack };
 }
 
 let queue: QueueItem[] = [];
@@ -356,16 +263,9 @@ async function playNextInQueue(): Promise<void> {
   currentItem = item;
 
   try {
-    let resource: ReturnType<typeof createAudioResource>;
-
-    if (item.resolved.type === 'deezer') {
-      const audioBuffer = await downloadTrack(item.resolved.track);
-      const stream = Readable.from(audioBuffer);
-      resource = createAudioResource(stream, { inputType: StreamType.Arbitrary, inlineVolume: true });
-    } else {
-      const ytStream = ytdlpStream(item.resolved.url);
-      resource = createAudioResource(ytStream, { inputType: StreamType.Arbitrary, inlineVolume: true });
-    }
+    const audioBuffer = await downloadTrack(item.resolved.track);
+    const stream = Readable.from(audioBuffer);
+    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary, inlineVolume: true });
 
     resource.volume?.setVolume(currentVolume);
 
@@ -574,7 +474,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     try {
       // Resolve título e fonte agora; o download/stream ocorre em playNextInQueue
       const resolved = await fetchTrack(query);
-      const title = resolved.type === 'deezer' ? trackDisplayName(resolved.track) : resolved.title;
+      const title = trackDisplayName(resolved.track);
 
       // Admin interrompendo rádio: para e limpa estado
       if (radioState !== null) {
