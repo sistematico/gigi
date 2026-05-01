@@ -6,6 +6,7 @@ import {
   Events,
   GatewayIntentBits,
   GuildMember,
+  Message,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -148,16 +149,37 @@ async function fetchTrack(query: string): Promise<{ type: 'deezer'; track: DfiTr
 }
 
 async function downloadTrack(track: DfiTrack): Promise<Buffer> {
-  const dlInfo = await dfi.getTrackDownloadUrl(track, 1);
-  if (!dlInfo) {
-    throw new Error('Faixa indisponível para download.');
+  // Try preferred qualities first and gracefully fallback on 403/availability issues.
+  const preferredQualities = [3, 1, 9] as const;
+  let lastError: Error | null = null;
+
+  for (const quality of preferredQualities) {
+    try {
+      const dlInfo = await dfi.getTrackDownloadUrl(track, quality);
+      if (!dlInfo) {
+        continue;
+      }
+
+      const raw = await downloadBinary(dlInfo.trackUrl);
+      return dlInfo.isEncrypted ? dfi.decryptDownload(raw, track.SNG_ID) : raw;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('403')) {
+        lastError = error;
+        continue;
+      }
+
+      if (error instanceof Error) {
+        lastError = error;
+        continue;
+      }
+    }
   }
-  const res = await fetch(dlInfo.trackUrl);
-  if (!res.ok) {
-    throw new Error(`Erro ao baixar faixa: ${res.status}`);
+
+  if (lastError) {
+    throw lastError;
   }
-  const raw = Buffer.from(await res.arrayBuffer());
-  return dlInfo.isEncrypted ? dfi.decryptDownload(raw, track.SNG_ID) : raw;
+
+  throw new Error('Faixa indisponível para download.');
 }
 
 function trackDisplayName(track: DfiTrack): string {
@@ -190,6 +212,46 @@ function fetchRadioStream(url: string, redirects = 5): Promise<Readable> {
   });
 }
 
+function downloadBinary(url: string, redirects = 5): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    if (redirects === 0) {
+      reject(new Error('Muitos redirecionamentos ao baixar faixa.'));
+      return;
+    }
+
+    const proto = url.startsWith('https') ? https : http;
+    const req = proto.get(
+      url,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          Accept: '*/*',
+        },
+      },
+      res => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const nextUrl = new URL(res.headers.location, url).toString();
+          res.resume();
+          resolve(downloadBinary(nextUrl, redirects - 1));
+          return;
+        }
+
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`Erro ao baixar faixa: ${res.statusCode ?? 'desconhecido'}`));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        res.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      },
+    );
+
+    req.on('error', reject);
+  });
+}
+
 // ─── Bot ──────────────────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -214,6 +276,7 @@ let activeGuildId: string | null = null;
 let activeVoiceChannelId: string | null = null;
 let activeTextChannelId: string | null = null;
 let isProcessingQueue = false;
+let queueMessageId: string | null = null;
 
 // ─── Permission helper ────────────────────────────────────────────────────────
 
@@ -222,6 +285,81 @@ function isAdmin(member: GuildMember): boolean {
     member.permissions.has(PermissionFlagsBits.Administrator) ||
     member.permissions.has(PermissionFlagsBits.ManageGuild)
   );
+}
+
+function buildQueueMessage(): string | null {
+  if (!currentItem && queue.length === 0) {
+    return null;
+  }
+
+  const lines: string[] = ['🎶 **Fila de reprodução**'];
+
+  if (currentItem) {
+    lines.push(`▶ **Tocando agora:** ${currentItem.title} — adicionado por **${currentItem.addedByTag}**`);
+  }
+
+  if (queue.length > 0) {
+    if (currentItem) {
+      lines.push('');
+    }
+    lines.push('**Próximas:**');
+    queue.forEach((item, i) => {
+      lines.push(`${i + 1}. ${item.title} — adicionado por **${item.addedByTag}**`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
+async function deleteQueueMessage(): Promise<void> {
+  if (!activeGuildId || !activeTextChannelId || !queueMessageId) {
+    queueMessageId = null;
+    return;
+  }
+
+  try {
+    const guild = await client.guilds.fetch(activeGuildId);
+    const channel = await guild.channels.fetch(activeTextChannelId) as TextChannel | null;
+    const msg = await channel?.messages.fetch(queueMessageId);
+    await msg?.delete();
+  } catch {
+    // pode já ter sido apagada manualmente
+  } finally {
+    queueMessageId = null;
+  }
+}
+
+async function syncQueueMessage(): Promise<void> {
+  const content = buildQueueMessage();
+  if (!content) {
+    await deleteQueueMessage();
+    return;
+  }
+
+  if (!activeGuildId || !activeTextChannelId) {
+    return;
+  }
+
+  try {
+    const guild = await client.guilds.fetch(activeGuildId);
+    const channel = await guild.channels.fetch(activeTextChannelId) as TextChannel | null;
+    if (!channel) return;
+
+    if (queueMessageId) {
+      try {
+        const existing = await channel.messages.fetch(queueMessageId);
+        await existing.edit(content);
+        return;
+      } catch {
+        queueMessageId = null;
+      }
+    }
+
+    const sent = await channel.send(content);
+    queueMessageId = sent.id;
+  } catch {
+    // falha silenciosa para não interromper fluxo de áudio
+  }
 }
 
 // ─── Audio player ─────────────────────────────────────────────────────────────
@@ -241,6 +379,7 @@ function clearPlayerState(): void {
   activeGuildId = null;
   activeVoiceChannelId = null;
   activeTextChannelId = null;
+  queueMessageId = null;
   isProcessingQueue = false;
 }
 
@@ -251,6 +390,7 @@ async function playNextInQueue(): Promise<void> {
   if (queue.length === 0) {
     isProcessingQueue = false;
     currentItem = null;
+    await deleteQueueMessage();
     if (activeGuildId) {
       const conn = getVoiceConnection(activeGuildId);
       conn?.destroy();
@@ -261,6 +401,7 @@ async function playNextInQueue(): Promise<void> {
 
   const item = queue.shift()!;
   currentItem = item;
+  await syncQueueMessage();
 
   try {
     const audioBuffer = await downloadTrack(item.resolved.track);
@@ -299,6 +440,8 @@ async function playNextInQueue(): Promise<void> {
 
     if (queue.length > 0) {
       playNextInQueue().catch(err => console.error('[playNextInQueue] erro na faixa seguinte:', err));
+    } else {
+      syncQueueMessage().catch(err => console.error('[playNextInQueue] erro ao sincronizar fila:', err));
     }
     // Não destrói a conexão em caso de erro — aguarda próximo /play ou /stop
   }
@@ -367,9 +510,16 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
     await interaction.deferReply();
 
+    // Remove o painel de botões após o clique para evitar interações antigas.
+    const radioMenuMessage = interaction.message;
+    if (radioMenuMessage instanceof Message && radioMenuMessage.author.id === client.user?.id) {
+      radioMenuMessage.delete().catch(() => undefined);
+    }
+
     // Admin interrompendo playlist ativa: limpa estado antes de iniciar a rádio
     if (currentItem !== null || queue.length > 0) {
       player.stop(true);
+      await deleteQueueMessage();
       if (activeGuildId) {
         const conn = getVoiceConnection(activeGuildId);
         conn?.destroy();
@@ -522,9 +672,11 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       const isIdle = player.state.status === AudioPlayerStatus.Idle;
       if (isIdle) {
         await interaction.editReply(`✅ **${title}** adicionado à fila`);
+        await syncQueueMessage();
         playNextInQueue().catch(err => console.error('[play] erro em playNextInQueue:', err));
       } else {
         await interaction.editReply(`✅ **${title}** adicionado à fila na posição **${queue.length}**`);
+        await syncQueueMessage();
       }
     } catch (error) {
       console.error('Erro ao processar /play:', error);
@@ -565,6 +717,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     }
 
     player.stop(true);
+    await deleteQueueMessage();
     connection?.destroy();
     clearPlayerState();
     await interaction.reply('⏹ Parado e desconectado.');
@@ -595,6 +748,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     const skipped = currentItem.title;
     currentItem = null;
     isProcessingQueue = false; // libera lock antes de parar
+    await syncQueueMessage();
     player.stop(true); // stateChange → Idle → playNextInQueue()
     await interaction.reply(`⏭ **${skipped}** pulada.`);
     return;
@@ -655,6 +809,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     }
 
     queue.splice(pos - 1, 1);
+    await syncQueueMessage();
     await interaction.reply(`🗑 **${item.title}** removida da fila.`);
     return;
   }
