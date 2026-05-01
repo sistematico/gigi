@@ -292,23 +292,18 @@ function buildQueueMessage(): string | null {
     return null;
   }
 
-  const lines: string[] = ['🎶 **Fila de reprodução**'];
+  const items: string[] = [];
 
   if (currentItem) {
-    lines.push(`▶ **Tocando agora:** ${currentItem.title} — adicionado por **${currentItem.addedByTag}**`);
+    items.push(`1 - Tocando agora: ${currentItem.title} | por ${currentItem.addedByTag}`);
   }
 
-  if (queue.length > 0) {
-    if (currentItem) {
-      lines.push('');
-    }
-    lines.push('**Próximas:**');
-    queue.forEach((item, i) => {
-      lines.push(`${i + 1}. ${item.title} — adicionado por **${item.addedByTag}**`);
-    });
-  }
+  queue.forEach((item, i) => {
+    const index = currentItem ? i + 2 : i + 1;
+    items.push(`${index} - ${item.title} | por ${item.addedByTag}`);
+  });
 
-  return lines.join('\n');
+  return ['🎶 Fila de reproducao', '```md', ...items, '```'].join('\n');
 }
 
 async function deleteQueueMessage(): Promise<void> {
@@ -413,16 +408,7 @@ async function playNextInQueue(): Promise<void> {
     player.play(resource);
     // isProcessingQueue só é liberado quando o player entrar em Playing (via stateChange)
 
-    // Anuncia no canal de texto
-    if (activeTextChannelId && activeGuildId) {
-      try {
-        const guild = await client.guilds.fetch(activeGuildId);
-        const channel = await guild.channels.fetch(activeTextChannelId) as TextChannel | null;
-        await channel?.send(`▶ Tocando: **${item.title}** — adicionado por **${item.addedByTag}**`);
-      } catch {
-        // falha silenciosa no anúncio
-      }
-    }
+    // A mensagem fixa da fila ja indica a musica atual para evitar duplicidade no chat.
   } catch (error) {
     console.error('[playNextInQueue] erro ao carregar faixa:', error);
     currentItem = null;
@@ -761,24 +747,13 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       return;
     }
 
-    if (!currentItem && queue.length === 0) {
-      await interaction.reply('📭 A fila está vazia.');
+    const content = buildQueueMessage();
+    if (!content) {
+      await interaction.reply('📭 A fila esta vazia.');
       return;
     }
 
-    const lines: string[] = [];
-    if (currentItem) {
-      lines.push(`▶ **Tocando agora:** ${currentItem.title} — adicionado por **${currentItem.addedByTag}**`);
-    }
-    if (queue.length > 0) {
-      lines.push('');
-      lines.push('**Na fila:**');
-      queue.forEach((item, i) => {
-        lines.push(`${i + 1}. ${item.title} — adicionado por **${item.addedByTag}**`);
-      });
-    }
-
-    await interaction.reply(lines.join('\n'));
+    await interaction.reply(content);
     return;
   }
 
