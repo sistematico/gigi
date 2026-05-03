@@ -20,6 +20,7 @@ import {
   VoiceConnectionStatus,
   createAudioPlayer,
   createAudioResource,
+  demuxProbe,
   entersState,
   getVoiceConnection,
   joinVoiceChannel,
@@ -263,6 +264,18 @@ function downloadBinary(url: string, redirects = 5): Promise<Buffer> {
   });
 }
 
+async function createStableAudioResource(stream: Readable) {
+  try {
+    const probed = await demuxProbe(stream);
+    return createAudioResource(probed.stream, {
+      inputType: probed.type,
+      inlineVolume: true,
+    });
+  } catch {
+    return createAudioResource(stream, { inputType: StreamType.Arbitrary, inlineVolume: true });
+  }
+}
+
 // ─── Bot ──────────────────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -439,8 +452,8 @@ async function playNextInQueue(): Promise<void> {
 
   try {
     const audioBuffer = await downloadTrack(item.resolved.track);
-    const stream = Readable.from(audioBuffer);
-    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary, inlineVolume: true });
+    const stream = Readable.from([audioBuffer]);
+    const resource = await createStableAudioResource(stream);
 
     resource.volume?.setVolume(currentVolume);
 
@@ -560,7 +573,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
     try {
       const stream = await fetchRadioStream(station.url);
-      const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary, inlineVolume: true });
+      const resource = await createStableAudioResource(stream);
       resource.volume?.setVolume(currentVolume);
 
       let connection = getVoiceConnection(interaction.guildId!);
