@@ -291,6 +291,7 @@ let repeatMode: RepeatMode = 'off';
 
 let isProcessingQueue = false;
 let queueMessageId: string | null = null;
+let volumeMessageId: string | null = null;
 
 // ─── Permission helper ────────────────────────────────────────────────────────
 
@@ -403,6 +404,7 @@ function clearPlayerState(): void {
   activeVoiceChannelId = null;
   activeTextChannelId = null;
   queueMessageId = null;
+  volumeMessageId = null;
   isProcessingQueue = false;
 }
 
@@ -716,11 +718,11 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
       const isIdle = player.state.status === AudioPlayerStatus.Idle;
       if (isIdle) {
-        await interaction.editReply(`✅ **${title}** adicionado à fila`);
+        await interaction.deleteReply();
         await syncQueueMessage();
         playNextInQueue().catch(err => console.error('[play] erro em playNextInQueue:', err));
       } else {
-        await interaction.editReply(`✅ **${title}** adicionado à fila na posição **${queue.length}**`);
+        await interaction.deleteReply();
         await syncQueueMessage();
       }
     } catch (error) {
@@ -858,7 +860,24 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       (state.resource as ReturnType<typeof createAudioResource>).volume?.setVolume(currentVolume);
     }
 
-    await interaction.reply(`🔊 Volume ajustado para **${nivel}%**`);
+    const volumeContent = `🔊 Volume ajustado para **${nivel}%**`;
+    if (volumeMessageId && activeGuildId && activeTextChannelId) {
+      try {
+        const guild = await client.guilds.fetch(activeGuildId);
+        const channel = await guild.channels.fetch(activeTextChannelId) as TextChannel | null;
+        const existing = await channel?.messages.fetch(volumeMessageId);
+        await existing?.edit(volumeContent);
+        await interaction.reply({ content: '\u200b', ephemeral: true });
+        await interaction.deleteReply();
+        return;
+      } catch {
+        volumeMessageId = null;
+      }
+    }
+
+    await interaction.reply(volumeContent);
+    const sent = await interaction.fetchReply();
+    volumeMessageId = sent.id;
     return;
   }
   } catch (err) {
