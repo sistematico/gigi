@@ -30,7 +30,10 @@ Edite o `.env`:
 ```env
 DISCORD_TOKEN=seu_token_aqui
 CLIENT_ID=id_da_aplicacao_aqui
+DEEZER_ARL=sua_cookie_arl_do_deezer_aqui
 ```
+
+Observação: se aparecer `VALID_TOKEN_REQUIRED` ou `Invalid CSRF token`, o valor de `DEEZER_ARL` expirou e precisa ser atualizado.
 
 ### 3. Instale as dependências
 

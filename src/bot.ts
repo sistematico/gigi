@@ -187,6 +187,17 @@ function trackDisplayName(track: DfiTrack): string {
   return `${track.ART_NAME} - ${track.SNG_TITLE}${version}`;
 }
 
+function normalizePlaybackError(error: unknown): string {
+  const rawMessage = error instanceof Error ? error.message : String(error ?? 'Erro desconhecido.');
+  const lowered = rawMessage.toLowerCase();
+
+  if (lowered.includes('valid_token_required') || lowered.includes('invalid csrf token')) {
+    return 'Sua sessão Deezer expirou (DEEZER_ARL inválido). Atualize o DEEZER_ARL no .env e reinicie o bot.';
+  }
+
+  return rawMessage;
+}
+
 // ─── Radio stream helper ──────────────────────────────────────────────────────
 
 function fetchRadioStream(url: string, redirects = 5): Promise<Readable> {
@@ -454,8 +465,14 @@ player.on('stateChange', (oldState, newState) => {
 client.once(Events.ClientReady, async readyClient => {
   console.log(`Pronto! Logado como ${readyClient.user.tag}`);
 
-  await dfi.initDeezerApi(DEEZER_ARL);
-  console.log('Deezer API inicializada.');
+  try {
+    await dfi.initDeezerApi(DEEZER_ARL);
+    console.log('Deezer API inicializada.');
+  } catch (error) {
+    const msg = normalizePlaybackError(error);
+    console.error(`Falha ao inicializar Deezer API: ${msg}`);
+    process.exit(1);
+  }
 
   const rest = new REST().setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), {
@@ -666,7 +683,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       }
     } catch (error) {
       console.error('Erro ao processar /play:', error);
-      const msg = error instanceof Error ? error.message : 'Erro desconhecido.';
+      const msg = normalizePlaybackError(error);
       await interaction.editReply(`Não foi possível reproduzir: ${msg}`);
     }
 
