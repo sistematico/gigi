@@ -286,6 +286,9 @@ let radioState: { stationName: string; emoji: string; startedBy: string } | null
 let activeGuildId: string | null = null;
 let activeVoiceChannelId: string | null = null;
 let activeTextChannelId: string | null = null;
+type RepeatMode = 'off' | 'all' | 'one';
+let repeatMode: RepeatMode = 'off';
+
 let isProcessingQueue = false;
 let queueMessageId: string | null = null;
 
@@ -335,6 +338,19 @@ async function deleteQueueMessage(): Promise<void> {
   }
 }
 
+function buildRepeatRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('repeat_all')
+      .setLabel('🔁 Repetir fila')
+      .setStyle(repeatMode === 'all' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('repeat_one')
+      .setLabel('🔂 Repetir faixa')
+      .setStyle(repeatMode === 'one' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+  );
+}
+
 async function syncQueueMessage(): Promise<void> {
   const content = buildQueueMessage();
   if (!content) {
@@ -354,14 +370,14 @@ async function syncQueueMessage(): Promise<void> {
     if (queueMessageId) {
       try {
         const existing = await channel.messages.fetch(queueMessageId);
-        await existing.edit(content);
+        await existing.edit({ content, components: [buildRepeatRow()] });
         return;
       } catch {
         queueMessageId = null;
       }
     }
 
-    const sent = await channel.send(content);
+    const sent = await channel.send({ content, components: [buildRepeatRow()] });
     queueMessageId = sent.id;
   } catch {
     // falha silenciosa para não interromper fluxo de áudio
@@ -382,6 +398,7 @@ function clearPlayerState(): void {
   queue = [];
   currentItem = null;
   radioState = null;
+  repeatMode = 'off';
   activeGuildId = null;
   activeVoiceChannelId = null;
   activeTextChannelId = null;
@@ -392,6 +409,15 @@ function clearPlayerState(): void {
 async function playNextInQueue(): Promise<void> {
   if (isProcessingQueue) return;
   isProcessingQueue = true;
+
+  // Handle repeat modes using the track that just finished
+  if (currentItem) {
+    if (repeatMode === 'one') {
+      queue.unshift(currentItem);
+    } else if (repeatMode === 'all') {
+      queue.push(currentItem);
+    }
+  }
 
   if (queue.length === 0) {
     isProcessingQueue = false;
@@ -564,6 +590,22 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       await interaction.editReply(`Não foi possível tocar a rádio: ${msg}`);
     }
 
+    return;
+  }
+
+  // ── Repeat buttons ─────────────────────────────────────────────────────────
+  if (interaction.isButton() && (interaction.customId === 'repeat_all' || interaction.customId === 'repeat_one')) {
+    if (radioState !== null) {
+      await interaction.reply({ content: 'Repetição não está disponível no modo rádio.', ephemeral: true });
+      return;
+    }
+
+    const mode: RepeatMode = interaction.customId === 'repeat_all' ? 'all' : 'one';
+    repeatMode = repeatMode === mode ? 'off' : mode;
+
+    const labels: Record<RepeatMode, string> = { off: 'desligado', all: 'repetindo fila', one: 'repetindo faixa' };
+    await interaction.reply({ content: `🔁 Modo de repetição: **${labels[repeatMode]}**`, ephemeral: true });
+    await syncQueueMessage();
     return;
   }
 
