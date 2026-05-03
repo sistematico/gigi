@@ -266,7 +266,12 @@ function downloadBinary(url: string, redirects = 5): Promise<Buffer> {
 
 async function createStableAudioResource(stream: Readable) {
   try {
-    const probed = await demuxProbe(stream);
+    const probed = await Promise.race([
+      demuxProbe(stream),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Probe timeout')), 2500);
+      }),
+    ]);
     return createAudioResource(probed.stream, {
       inputType: probed.type,
       inlineVolume: true,
@@ -404,6 +409,16 @@ const player = createAudioPlayer();
 
 player.on('error', error => {
   console.error('Erro no player de áudio:', error.message);
+
+  // Evita deadlock da fila quando a faixa falha antes de entrar em Playing.
+  isProcessingQueue = false;
+  currentItem = null;
+
+  if (radioState === null && queue.length > 0) {
+    playNextInQueue().catch(err => console.error('[player.error] erro ao avançar fila:', err));
+  } else {
+    syncQueueMessage().catch(err => console.error('[player.error] erro ao sincronizar fila:', err));
+  }
 });
 
 // ─── Playlist state management ────────────────────────────────────────────────
@@ -489,6 +504,11 @@ async function playNextInQueue(): Promise<void> {
 player.on('stateChange', (oldState, newState) => {
   // Libera o lock assim que o player começa a tocar de verdade
   if (newState.status === AudioPlayerStatus.Playing) {
+    isProcessingQueue = false;
+  }
+
+  // Também libera lock ao voltar para Idle para não travar em falhas de decode/probe.
+  if (newState.status === AudioPlayerStatus.Idle) {
     isProcessingQueue = false;
   }
 
