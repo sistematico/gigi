@@ -308,6 +308,7 @@ type RepeatMode = 'off' | 'all' | 'one';
 let repeatMode: RepeatMode = 'off';
 
 let isProcessingQueue = false;
+let playbackGeneration = 0;
 let queueMessageId: string | null = null;
 let volumeMessageId: string | null = null;
 
@@ -424,6 +425,7 @@ player.on('error', error => {
 // ─── Playlist state management ────────────────────────────────────────────────
 
 function clearPlayerState(): void {
+  playbackGeneration++; // invalidate any in-flight downloads
   queue = [];
   currentItem = null;
   radioState = null;
@@ -439,6 +441,7 @@ function clearPlayerState(): void {
 async function playNextInQueue(): Promise<void> {
   if (isProcessingQueue) return;
   isProcessingQueue = true;
+  const generation = playbackGeneration;
 
   // Handle repeat modes using the track that just finished
   if (currentItem) {
@@ -467,8 +470,20 @@ async function playNextInQueue(): Promise<void> {
 
   try {
     const audioBuffer = await downloadTrack(item.resolved.track);
+
+    // If a skip/stop happened while downloading, abandon this stale download.
+    if (generation !== playbackGeneration) {
+      isProcessingQueue = false;
+      return;
+    }
+
     const stream = Readable.from([audioBuffer]);
     const resource = await createStableAudioResource(stream);
+
+    if (generation !== playbackGeneration) {
+      isProcessingQueue = false;
+      return;
+    }
 
     resource.volume?.setVolume(currentVolume);
 
@@ -826,10 +841,16 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     }
 
     const skipped = currentItem.title;
+    playbackGeneration++; // invalidate any in-flight download for the current track
     currentItem = null;
     isProcessingQueue = false; // libera lock antes de parar
     await syncQueueMessage();
-    player.stop(true); // stateChange → Idle → playNextInQueue()
+    player.stop(true); // triggers stateChange → Idle → playNextInQueue() when player was active
+    // player.stop(true) only emits stateChange when transitioning from a non-Idle state.
+    // If the player is already Idle (e.g., between tracks while downloading), trigger directly.
+    if (player.state.status === AudioPlayerStatus.Idle && !isProcessingQueue) {
+      playNextInQueue().catch(err => console.error('[skip] erro em playNextInQueue:', err));
+    }
     await interaction.reply(`⏭ **${skipped}** pulada.`);
     return;
   }
